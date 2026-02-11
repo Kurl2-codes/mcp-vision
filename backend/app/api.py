@@ -12,11 +12,13 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from dotenv import load_dotenv
 from PIL import Image
 import google.generativeai as genai
 from pymongo import MongoClient
 import tensorflow as tf 
+
+# Import configuration
+from config.settings import settings
 
 # Import DeepFace safely
 FACE_REC_AVAILABLE = False
@@ -31,13 +33,12 @@ except Exception as e:
 from mcp_vision.server import locate_objects, zoom_to_object, init_objdet_pipeline
 from mcp_vision.utils import pil_to_base64
 
-load_dotenv()
-
 # Read Questionnaire
 QUESTIONNAIRE_TEXT = ""
 try:
-    if os.path.exists("vlm_vla_questionnaire.md"):
-        with open("vlm_vla_questionnaire.md", "r", encoding="utf-8") as f:
+    questionnaire_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "vlm_vla_questionnaire.md")
+    if os.path.exists(questionnaire_path):
+        with open(questionnaire_path, "r", encoding="utf-8") as f:
             QUESTIONNAIRE_TEXT = f.read()
 except Exception as e:
     print(f"Warning: Could not read questionnaire file: {e}")
@@ -54,23 +55,20 @@ app.add_middleware(
 )
 
 # Mount static files for images
-os.makedirs("images/uploads", exist_ok=True)
-os.makedirs("images/faces", exist_ok=True)
-app.mount("/images", StaticFiles(directory="images"), name="images")
+os.makedirs(settings.UPLOADS_DIR, exist_ok=True)
+os.makedirs(settings.FACES_DIR, exist_ok=True)
+app.mount("/images", StaticFiles(directory=settings.IMAGES_DIR), name="images")
 
 # Configure Gemini
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-if not GEMINI_API_KEY:
-    print("WARNING: GEMINI_API_KEY not found in environment variables.")
+if settings.GEMINI_API_KEY:
+    genai.configure(api_key=settings.GEMINI_API_KEY)
 else:
-    genai.configure(api_key=GEMINI_API_KEY)
+    print("WARNING: GEMINI_API_KEY not found in environment variables.")
 
 # MongoDB Setup
-MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017/")
-MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "mcp_vision_db")
 try:
-    client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=2000)
-    db = client[MONGO_DB_NAME]
+    client = MongoClient(settings.MONGO_URI, serverSelectionTimeoutMS=2000)
+    db = client[settings.MONGO_DB_NAME]
     history_collection = db["history"]
     faces_collection = db["faces"]
     sessions_collection = db["sessions"]
@@ -90,26 +88,25 @@ def _register_face_internal(image: Image.Image, name: str) -> str:
     Internal helper to save face image, clear pickle, and return a description.
     """
     # Create folder for person
-    person_dir = os.path.join("images/faces", name)
+    person_dir = os.path.join(settings.FACES_DIR, name)
     os.makedirs(person_dir, exist_ok=True)
 
     # Save image for Face Rec training
-    filename = f"{uuid.uuid4()}.jpg"
-    filepath = os.path.join(person_dir, filename)
+    filepath = os.path.join(person_dir, f"{uuid.uuid4()}.jpg")
     image.save(filepath)
     
     # Also copy to uploads for history/display
     history_filename = f"{uuid.uuid4()}.jpg"
-    history_filepath = os.path.join("images/uploads", history_filename)
+    history_filepath = os.path.join(settings.UPLOADS_DIR, history_filename)
     image.save(history_filepath)
 
     # Remove the pickle file to force DeepFace to re-scan the DB next time
-    pkl_path = os.path.join("images/faces", "representations_vgg_face.pkl")
+    pkl_path = os.path.join(settings.FACES_DIR, "representations_vgg_face.pkl")
     if os.path.exists(pkl_path):
         os.remove(pkl_path)
         
     # --- Run Gemini Analysis for Metadata ---
-    if GEMINI_API_KEY:
+    if settings.GEMINI_API_KEY:
         model = genai.GenerativeModel('gemini-2.0-flash-lite-001')
         analysis_prompt = f"Describe the appearance of this person named {name}. Include details about clothing, colors, and accessories."
         response = model.generate_content([analysis_prompt, image])
@@ -190,7 +187,7 @@ async def process_questionnaire(request: AnalyzeRequest):
     Process the full VLA questionnaire in a single batch request.
     Uses Gemini 1.5 Flash (Lowest Cost).
     """
-    if not GEMINI_API_KEY:
+    if not settings.GEMINI_API_KEY:
         raise HTTPException(status_code=500, detail="Gemini API Key not configured")
 
     try:
@@ -259,7 +256,7 @@ async def analyze_image(request: AnalyzeRequest):
     """
     Analyzes an image using Gemini Flash locally + Face Rec + MongoDB logging.
     """
-    if not GEMINI_API_KEY:
+    if not settings.GEMINI_API_KEY:
         raise HTTPException(status_code=500, detail="Gemini API Key not configured")
 
     try:
@@ -316,16 +313,16 @@ async def analyze_image(request: AnalyzeRequest):
                 }
             
             filename = f"{uuid.uuid4()}.jpg"
-            filepath = os.path.join("images/uploads", filename)
+            filepath = os.path.join(settings.UPLOADS_DIR, filename)
             image.save(filepath)
 
             # 2. Face Recognition (Who is this?)
             # OPTIMIZATION: Only run DeepFace if we have registered faces
-            has_registered_faces = any(os.path.isdir(os.path.join("images/faces", d)) for d in os.listdir("images/faces"))
+            has_registered_faces = any(os.path.isdir(os.path.join(settings.FACES_DIR, d)) for d in os.listdir(settings.FACES_DIR))
             
             if FACE_REC_AVAILABLE and has_registered_faces:
                 try:
-                    dfs = DeepFace.find(img_path=filepath, db_path="images/faces", model_name="VGG-Face", enforce_detection=False, silent=True)
+                    dfs = DeepFace.find(img_path=filepath, db_path=settings.FACES_DIR, model_name="VGG-Face", enforce_detection=False, silent=True)
                     for df in dfs:
                         if not df.empty:
                             paths = df['identity'].values
@@ -425,21 +422,20 @@ async def register_face(request: AnalyzeRequest): # Reusing AnalyzeRequest for i
             image = image.convert('RGB')
 
         # Create folder for person
-        person_dir = os.path.join("images/faces", name)
+        person_dir = os.path.join(settings.FACES_DIR, name)
         os.makedirs(person_dir, exist_ok=True)
 
         # Save image for Face Rec training
-        filename = f"{uuid.uuid4()}.jpg"
-        filepath = os.path.join(person_dir, filename)
+        filepath = os.path.join(person_dir, f"{uuid.uuid4()}.jpg")
         image.save(filepath)
         
         # Also copy to uploads for history/display
         history_filename = f"{uuid.uuid4()}.jpg"
-        history_filepath = os.path.join("images/uploads", history_filename)
+        history_filepath = os.path.join(settings.UPLOADS_DIR, history_filename)
         image.save(history_filepath)
 
         # Remove the pickle file to force DeepFace to re-scan the DB next time
-        pkl_path = os.path.join("images/faces", "representations_vgg_face.pkl")
+        pkl_path = os.path.join(settings.FACES_DIR, "representations_vgg_face.pkl")
         if os.path.exists(pkl_path):
             os.remove(pkl_path)
             
@@ -474,10 +470,10 @@ async def register_face(request: AnalyzeRequest): # Reusing AnalyzeRequest for i
 @app.get("/identities")
 def get_identities():
     """Returns list of known names with image counts"""
-    if not os.path.exists("images/faces"):
+    if not os.path.exists(settings.FACES_DIR):
         return {"identities": []}
     
-    names = [d for d in os.listdir("images/faces") if os.path.isdir(os.path.join("images/faces", d))]
+    names = [d for d in os.listdir(settings.FACES_DIR) if os.path.isdir(os.path.join(settings.FACES_DIR, d))]
     
     identities_with_counts = []
     

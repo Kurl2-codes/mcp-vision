@@ -1,0 +1,102 @@
+@import "tailwindcss";
+
+
+@theme {
+    /* Fonts */
+    --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+    --font-serif: 'Roboto Slab', serif;
+
+    /* Brand Colors (Mapping to existing classes for instant re-skin) */
+
+    /* Backgrounds (Dark Blue Theme) */
+    --color-slate-950: #121E34;
+    /* Main Background */
+    --color-slate-900: #172641;
+    /* Sidebar / Panels */
+    --color-slate-800: #1C3765;
+    /* Borders / Inputs (using brand secondary blue) */
+    --color-slate-700: #2A4A80;
+    /* Hover states */
+
+    /* Text (Keep light for dark mode, but use brand white) */
+    --color-slate-50: #f8fafc;
+    --color-slate-100: #f1f5f9;
+    --color-slate-200: #e2e8f0;
+    --color-slate-300: #cbd5e1;
+    --color-slate-400: #94a3b8;
+    --color-slate-500: #64748b;
+    --color-slate-600: #475569;
+
+    /* Accents (Orange Theme) */
+    --color-indigo-400: #FF9E4A;
+    /* Light Orange */
+    --color-indigo-500: #FD7912;
+    /* Brand Orange */
+    --color-indigo-600: #E06000;
+    /* Darker Orange for hover */
+
+    /* Secondary Accents */
+    --color-blue-500: #3b82f6;
+    --color-blue-600: #2563eb;
+}
+
+:root {
+    font-family: var(--font-sans);
+}
+
+body {
+    @apply bg-slate-950 text-slate-100;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+}
+
+::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+    @apply bg-slate-700 rounded-full;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    @apply bg-slate-600;
+}
+
+/* Animations */
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+        transform: translateY(10px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.animate-fade-in {
+    animation: fadeIn 0.3s ease-out forwards;
+}
+
+/* Glassmorphism utilities */
+.glass {
+    @apply bg-slate-900/70 backdrop-blur-lg border border-white/10;
+}
+
+.glass-hover {
+    @apply hover:bg-white/5 transition-colors duration-200;
+}
+
+.scrollbar-hide::-webkit-scrollbar {
+    display: none;
+}
+
+.scrollbar-hide {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+}

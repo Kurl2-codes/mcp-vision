@@ -1,0 +1,34 @@
+# =============================================================================
+# MCP Vision Backend Requirements
+# =============================================================================
+# Production-ready dependencies for the MCP Vision application
+
+# Core Framework
+fastapi>=0.128.6
+uvicorn>=0.34.2
+python-multipart>=0.0.22
+
+# AI/ML Libraries
+google-generativeai>=0.8.3
+deepface>=0.0.98
+tf-keras>=2.20.1
+tensorflow>=2.20.0
+torch>=2.7.0
+transformers>=4.51.3
+scipy>=1.15.2
+
+# Database
+pymongo>=4.16.0
+
+# Image Processing
+pillow>=11.2.1
+
+# MCP (Model Context Protocol)
+mcp[cli]>=1.6.0
+
+# Configuration & Environment
+python-dotenv>=1.1.0
+
+# Development Dependencies (optional)
+ruff>=0.7.3
+pytest>=8.0.0
