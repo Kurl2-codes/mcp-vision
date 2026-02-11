@@ -5,10 +5,9 @@ from contextlib import asynccontextmanager
 import logging
 
 from mcp.server.fastmcp import FastMCP
-from transformers import pipeline
 from PIL import Image as PILImage
 
-from mcp_vision.utils import to_mcp_image, MCPImage
+from core.utils import to_mcp_image, MCPImage
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +42,7 @@ mcp = FastMCP(
 
 def load_hf_objdet_pipeline(model_name: str):
     start = time.time()
+    from transformers import pipeline
     objdet_model = pipeline(task="zero-shot-object-detection", model=model_name)
     print(f"Loaded zero-shot object detection pipline for {model_name} in {time.time() - start:.2f} seconds.")
     return {"model_name": model_name, "model": objdet_model}

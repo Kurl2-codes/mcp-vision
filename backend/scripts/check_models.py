@@ -10,6 +10,9 @@ import sys
 # Add the parent directory to the path to import from config
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# Change to backend directory to ensure we're in the right context
+os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from config.settings import settings
 import google.generativeai as genai
 

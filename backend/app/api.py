@@ -15,33 +15,12 @@ from pydantic import BaseModel
 from PIL import Image
 import google.generativeai as genai
 from pymongo import MongoClient
-import tensorflow as tf 
-
 # Import configuration
 from config.settings import settings
 
-# Import DeepFace safely
-FACE_REC_AVAILABLE = False
-try:
-    from deepface import DeepFace
-    FACE_REC_AVAILABLE = True
-    print("DeepFace imported successfully.")
-except Exception as e:
-    print(f"WARNING: DeepFace could not be imported. Face recognition will be disabled. Error: {e}")
-
 # Import existing MCP tools
-from mcp_vision.server import locate_objects, zoom_to_object, init_objdet_pipeline
-from mcp_vision.utils import pil_to_base64
-
-# Read Questionnaire
-QUESTIONNAIRE_TEXT = ""
-try:
-    questionnaire_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "vlm_vla_questionnaire.md")
-    if os.path.exists(questionnaire_path):
-        with open(questionnaire_path, "r", encoding="utf-8") as f:
-            QUESTIONNAIRE_TEXT = f.read()
-except Exception as e:
-    print(f"Warning: Could not read questionnaire file: {e}")
+from core.server import locate_objects, zoom_to_object, init_objdet_pipeline
+from core.utils import pil_to_base64
 
 app = FastAPI()
 
@@ -58,6 +37,8 @@ app.add_middleware(
 os.makedirs(settings.UPLOADS_DIR, exist_ok=True)
 os.makedirs(settings.FACES_DIR, exist_ok=True)
 app.mount("/images", StaticFiles(directory=settings.IMAGES_DIR), name="images")
+# Mount faces directory for verification UI (reference images)
+app.mount("/images/faces", StaticFiles(directory=settings.FACES_DIR), name="faces")
 
 # Configure Gemini
 if settings.GEMINI_API_KEY:
@@ -76,17 +57,17 @@ try:
 except Exception as e:
     print(f"Warning: Could not connect to MongoDB: {e}")
 
-# Initialize MCP models on startup
-@app.on_event("startup")
-async def startup_event():
-    print("Initializing Object Detection Pipeline...")
-    init_objdet_pipeline()
-    print("Pipeline Initialized.")
-
 def _register_face_internal(image: Image.Image, name: str) -> str:
     """
     Internal helper to save face image, clear pickle, and return a description.
     """
+    # Lazy import DeepFace to check availability (not strictly needed for registration but good for consistency)
+    # Lazy import DeepFace to check availability (not strictly needed for registration but good for consistency)
+    try:
+        from deepface import DeepFace
+    except ImportError:
+        print("WARNING: DeepFace not installed.")
+
     # Create folder for person
     person_dir = os.path.join(settings.FACES_DIR, name)
     os.makedirs(person_dir, exist_ok=True)
@@ -172,14 +153,28 @@ class AnalyzeRequest(BaseModel):
     image_base64: Optional[str] = None
     prompt: str
     session_id: Optional[str] = None
+    skip_faces: bool = False # New flag for "Describe Only" mode
+    detailed_analysis: bool = True # New flag for "Detailed Analysis" mode (default True for backward compat)
 
 class ZoomRequest(BaseModel):
     image_base64: str
     label: str
 
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
 @app.get("/")
 def read_root():
     return {"status": "ok", "message": "MCP Vision API is running"}
+
+@app.post("/login")
+async def login(request: LoginRequest):
+    # Hardcoded for now, could be in .env or DB
+    if request.username == "admin" and request.password == "admin123":
+        return {"status": "success", "user": {"name": "Karl Silva", "role": "Pro User"}}
+    else:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
 
 @app.post("/questionnaire")
 async def process_questionnaire(request: AnalyzeRequest):
@@ -317,43 +312,85 @@ async def analyze_image(request: AnalyzeRequest):
             image.save(filepath)
 
             # 2. Face Recognition (Who is this?)
-            # OPTIMIZATION: Only run DeepFace if we have registered faces
+            # OPTIMIZATION: Only run DeepFace if we have registered faces AND if not skipped
+            matches = [] # store detailed match info: {name, box, confidence, reference_image}
+            
             has_registered_faces = any(os.path.isdir(os.path.join(settings.FACES_DIR, d)) for d in os.listdir(settings.FACES_DIR))
             
-            if FACE_REC_AVAILABLE and has_registered_faces:
+            if has_registered_faces and not request.skip_faces:
                 try:
+                    from deepface import DeepFace
+                    # Run find with enforce_detection=False to avoid crashes on no faces
+                    # We need to access individual results
                     dfs = DeepFace.find(img_path=filepath, db_path=settings.FACES_DIR, model_name="VGG-Face", enforce_detection=False, silent=True)
+                    
                     for df in dfs:
                         if not df.empty:
-                            paths = df['identity'].values
-                            for p in paths:
-                                name = os.path.basename(os.path.dirname(p))
+                            # Iterate through DataFrame rows
+                            for index, row in df.iterrows():
+                                identity_path = row['identity']
+                                name = os.path.basename(os.path.dirname(identity_path))
+                                
+                                # Confidence logic (VGG-Face cosine distance)
+                                # Lower distance = Higher confidence. Threshold is usually ~0.40
+                                distance = row.get('distance', 0)
+                                confidence = max(0, min(100, (1 - distance) * 100)) # Simple approximation
+                                
+                                # Bounding Box (x, y, w, h)
+                                source_x = row.get('source_x', 0)
+                                source_y = row.get('source_y', 0)
+                                source_w = row.get('source_w', 0)
+                                source_h = row.get('source_h', 0)
+                                
+                                # Reference Image URL (served via static mount)
+                                # Path: faces/NAME/uuid.jpg -> URL: /images/faces/NAME/uuid.jpg
+                                ref_filename = os.path.basename(identity_path)
+                                reference_url = f"http://localhost:8000/images/faces/{name}/{ref_filename}"
+
                                 if name not in identified_people:
                                     identified_people.append(name)
+                                    
+                                matches.append({
+                                    "name": name,
+                                    "box": {"x": source_x, "y": source_y, "w": source_w, "h": source_h},
+                                    "confidence": f"{confidence:.1f}%",
+                                    "reference_image": reference_url
+                                })
+
                 except Exception as e:
                     print(f"Face Rec Warning: {e}")
+                    traceback.print_exc()
             
             # 3. Gemini Analysis (Description / Tags)
-            model = genai.GenerativeModel('gemini-2.0-flash-lite-001')
-            
-            # If we found people, inform Gemini
-            context_prompt = request.prompt
-            
-            # Inject Micro-VLA structure if user asks to "describe"
-            if "describe" in request.prompt.lower():
-                 context_prompt = (
-                     f"{request.prompt}\n\n"
-                     "Provide a **bulleted summary (max 30 words)**:\n"
-                     "- **People**: " + (", ".join(identified_people) if identified_people else "None") + "\n"
-                     "- **Key Details**: \n"
-                     "- **Action**: "
-                 )
-            elif identified_people:
-                names_str = ", ".join(identified_people)
-                context_prompt = f"The image contains these known people: {names_str}. {request.prompt}"
+            # Only run if detailed_analysis is True OR if we found people (to contextually link them) 
+            # OR if skip_faces is True (Vision Mode always gets analysis)
+            if request.detailed_analysis or request.skip_faces:
+                model = genai.GenerativeModel('gemini-2.0-flash-lite-001')
+                
+                # If we found people, inform Gemini
+                context_prompt = request.prompt
+                
+                # Inject Micro-VLA structure if user asks to "describe"
+                if "describe" in request.prompt.lower():
+                     context_prompt = (
+                         f"{request.prompt}\n\n"
+                         "Provide a **bulleted summary (max 30 words)**:\n"
+                         "- **People**: " + (", ".join(identified_people) if identified_people else "None") + "\n"
+                         "- **Key Details**: \n"
+                         "- **Action**: "
+                     )
+                elif identified_people:
+                    names_str = ", ".join(identified_people)
+                    context_prompt = f"The image contains these known people: {names_str}. {request.prompt}"
 
-            response = model.generate_content([context_prompt, image])
-            analysis_text = response.text
+                response = model.generate_content([context_prompt, image])
+                analysis_text = response.text
+            else:
+                # FAST PATH: No Gemini Analysis, just identities
+                if identified_people:
+                    analysis_text = f"Identified: {', '.join(identified_people)}"
+                else:
+                    analysis_text = "No known faces found."
 
         # 4. Save to MongoDB (Global History)
         log_entry = {
@@ -395,7 +432,7 @@ async def analyze_image(request: AnalyzeRequest):
                  {"$set": {"title": request.prompt[:30] + "..."}}
              )
 
-        return {"response": analysis_text, "identities": identified_people}
+        return {"response": analysis_text, "identities": identified_people, "matches": matches}
 
     except Exception as e:
         traceback.print_exc()
@@ -466,6 +503,91 @@ async def register_face(request: AnalyzeRequest): # Reusing AnalyzeRequest for i
     except Exception as e:
          traceback.print_exc()
          raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/batch_upload")
+async def batch_upload(
+    file: UploadFile = File(...),
+    run_analysis: bool = True # Default to True, but frontend can toggle
+):
+    """
+    Handles bulk import of images.
+    1. Saves image locally.
+    2. Runs DeepFace (Local/Free) to tag identities.
+    3. OPTIONAL: Runs Gemini (Cloud/Cost) to describe clothing/actions.
+    4. Saves context to MongoDB.
+    """
+    try:
+        # 1. Save File
+        filename = f"{uuid.uuid4()}.jpg"
+        filepath = os.path.join(settings.UPLOADS_DIR, filename)
+        
+        # Read and save (Handle generic uploads)
+        content = await file.read()
+        image = Image.open(io.BytesIO(content))
+        if image.mode == 'RGBA':
+            image = image.convert('RGB')
+        image.save(filepath)
+        
+        # 2. DeepFace (Local Face Rec) - Always run
+        identified_people = []
+        # Check if faces dir has any folders
+        has_registered_faces = any(os.path.isdir(os.path.join(settings.FACES_DIR, d)) for d in os.listdir(settings.FACES_DIR))
+        
+        if has_registered_faces:
+            try:
+                from deepface import DeepFace
+                # Run find
+                dfs = DeepFace.find(img_path=filepath, db_path=settings.FACES_DIR, model_name="VGG-Face", enforce_detection=False, silent=True)
+                for df in dfs:
+                    if not df.empty:
+                        paths = df['identity'].values
+                        for p in paths:
+                            name = os.path.basename(os.path.dirname(p))
+                            if name not in identified_people:
+                                identified_people.append(name)
+            except Exception as e:
+                print(f"DeepFace Warning: {e}")
+
+        # 3. Gemini (Deep Scan) - Optional
+        analysis_text = ""
+        if run_analysis and settings.GEMINI_API_KEY:
+            try:
+                model = genai.GenerativeModel('gemini-2.0-flash-lite-001')
+                
+                prompt = "Describe this image efficiently. Focus on: 1) Who is it (gender/age)? 2) Clothing colors/style. 3) Action/Context. Keep it under 40 words."
+                if identified_people:
+                    prompt = f"This is {', '.join(identified_people)}. {prompt}"
+                
+                response = model.generate_content([prompt, image])
+                analysis_text = response.text
+            except Exception as e:
+                print(f"Gemini Warning: {e}")
+                analysis_text = "Analysis skipped or failed."
+        else:
+            analysis_text = "Imported Image (No Deep Scan)"
+
+        # 4. Save to DB
+        log_entry = {
+            "timestamp": datetime.now(),
+            "filepath": filepath,
+            "prompt": "Batch Import",
+            "analysis": analysis_text,
+            "identities": identified_people,
+            "type": "import"
+        }
+        
+        if 'history_collection' in globals():
+            history_collection.insert_one(log_entry)
+
+        return {
+            "filename": filename,
+            "identities": identified_people,
+            "analysis": analysis_text
+        }
+
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/identities")
 def get_identities():
