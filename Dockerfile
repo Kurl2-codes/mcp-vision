@@ -27,7 +27,7 @@ COPY --from=uv --chown=app:app /app/.venv /app/.venv
 ENV PATH="/app/.venv/bin:$PATH"
 
 # Create images directory
-RUN mkdir -p images/uploads images/faces
+RUN mkdir -p backend/images/uploads backend/images/faces
 
 # Expose port
 EXPOSE 8000

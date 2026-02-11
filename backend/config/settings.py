@@ -30,7 +30,7 @@ class Settings:
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
     
     # File Paths
-    IMAGES_DIR: str = os.getenv("IMAGES_DIR", "images")
+    IMAGES_DIR: str = os.getenv("IMAGES_DIR", "backend/images")
     UPLOADS_DIR: str = os.path.join(IMAGES_DIR, "uploads")
     FACES_DIR: str = os.path.join(IMAGES_DIR, "faces")
     

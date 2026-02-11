@@ -20,7 +20,7 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - ./images:/app/images
+      - ./backend/images:/app/backend/images
       - ./.env:/app/.env:ro
     depends_on:
       - mongodb
