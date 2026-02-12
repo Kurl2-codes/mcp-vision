@@ -7,11 +7,13 @@ export default function ImportModal({ isOpen, onClose, onUploadComplete }) {
     const folderInputRef = useRef(null);
     const [dragActive, setDragActive] = useState(false);
 
+    const [runAnalysis, setRunAnalysis] = useState(false);
+
     if (!isOpen) return null;
 
     const handleFiles = async (files) => {
         if (!files || files.length === 0) return;
-        const success = await uploadFiles(files);
+        const success = await uploadFiles(files, runAnalysis);
         if (success) {
             setTimeout(() => {
                 onUploadComplete?.();
@@ -30,6 +32,7 @@ export default function ImportModal({ isOpen, onClose, onUploadComplete }) {
         }
     };
 
+    // ... existing handleDrag ...
     const handleDrag = (e) => {
         e.preventDefault();
         e.stopPropagation();
@@ -81,51 +84,66 @@ export default function ImportModal({ isOpen, onClose, onUploadComplete }) {
                             )}
                         </div>
                     ) : (
-                        <div
-                            className={`w-full border-2 border-dashed rounded-xl p-10 flex flex-col items-center justify-center transition-all ${dragActive ? 'border-indigo-500 bg-indigo-500/10' : 'border-slate-700 hover:border-indigo-500/50 hover:bg-slate-800/30'}`}
-                            onDragEnter={handleDrag}
-                            onDragLeave={handleDrag}
-                            onDragOver={handleDrag}
-                            onDrop={handleDrop}
-                        >
-                            <svg className="w-16 h-16 text-slate-600 mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" /></svg>
-                            <p className="text-slate-300 font-medium mb-1">Drag & Drop images here</p>
-                            <p className="text-slate-500 text-sm mb-6">or click to browse</p>
+                        <>
+                            <div
+                                className={`w-full border-2 border-dashed rounded-xl p-10 flex flex-col items-center justify-center transition-all ${dragActive ? 'border-indigo-500 bg-indigo-500/10' : 'border-slate-700 hover:border-indigo-500/50 hover:bg-slate-800/30'}`}
+                                onDragEnter={handleDrag}
+                                onDragLeave={handleDrag}
+                                onDragOver={handleDrag}
+                                onDrop={handleDrop}
+                            >
+                                <svg className="w-16 h-16 text-slate-600 mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" /></svg>
+                                <p className="text-slate-300 font-medium mb-1">Drag & Drop images here</p>
+                                <p className="text-slate-500 text-sm mb-6">or click to browse</p>
 
-                            <div className="flex space-x-3">
-                                <input
-                                    ref={fileInputRef}
-                                    type="file"
-                                    multiple
-                                    accept="image/*"
-                                    className="hidden"
-                                    onChange={(e) => handleFiles(e.target.files)}
-                                />
-                                <button
-                                    onClick={() => fileInputRef.current.click()}
-                                    className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg transition-colors font-medium text-sm shadow-lg shadow-indigo-600/20"
-                                >
-                                    Select Files
-                                </button>
+                                <div className="flex space-x-3">
+                                    <input
+                                        ref={fileInputRef}
+                                        type="file"
+                                        multiple
+                                        accept="image/*"
+                                        className="hidden"
+                                        onChange={(e) => handleFiles(e.target.files)}
+                                    />
+                                    <button
+                                        onClick={() => fileInputRef.current.click()}
+                                        className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg transition-colors font-medium text-sm shadow-lg shadow-indigo-600/20"
+                                    >
+                                        Select Files
+                                    </button>
 
-                                {/* Folder Upload (webkitdirectory) */}
-                                <input
-                                    ref={folderInputRef}
-                                    type="file"
-                                    // @ts-ignore - webkitdirectory is non-standard but supported
-                                    webkitdirectory=""
-                                    directory=""
-                                    className="hidden"
-                                    onChange={(e) => handleFiles(e.target.files)}
-                                />
-                                <button
-                                    onClick={() => folderInputRef.current.click()}
-                                    className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg transition-colors font-medium text-sm border border-slate-700"
-                                >
-                                    Select Folder
-                                </button>
+                                    {/* Folder Upload (webkitdirectory) */}
+                                    <input
+                                        ref={folderInputRef}
+                                        type="file"
+                                        // @ts-ignore - webkitdirectory is non-standard but supported
+                                        webkitdirectory=""
+                                        directory=""
+                                        className="hidden"
+                                        onChange={(e) => handleFiles(e.target.files)}
+                                    />
+                                    <button
+                                        onClick={() => folderInputRef.current.click()}
+                                        className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg transition-colors font-medium text-sm border border-slate-700"
+                                    >
+                                        Select Folder
+                                    </button>
+                                </div>
                             </div>
-                        </div>
+
+                            <div className="flex items-center space-x-2 text-sm text-slate-400">
+                                <input
+                                    type="checkbox"
+                                    id="runAnalysis"
+                                    checked={runAnalysis}
+                                    onChange={(e) => setRunAnalysis(e.target.checked)}
+                                    className="rounded border-slate-700 bg-slate-800 text-indigo-600 focus:ring-indigo-500 focus:ring-offset-slate-900"
+                                />
+                                <label htmlFor="runAnalysis" className="cursor-pointer select-none">
+                                    Run Detailed AI Analysis (Slower)
+                                </label>
+                            </div>
+                        </>
                     )}
 
                     <div className="text-center text-xs text-slate-500 max-w-sm">

@@ -7,7 +7,7 @@ export function useImport() {
     const [progress, setProgress] = useState(0);
     const [uploadStatus, setUploadStatus] = useState(null); // { type: 'success' | 'error', message: string }
 
-    const uploadFiles = async (files) => {
+    const uploadFiles = async (files, runAnalysis = false) => {
         if (!files || files.length === 0) return;
 
         setIsUploading(true);
@@ -19,8 +19,14 @@ export function useImport() {
             formData.append('files', file);
         });
 
+        // Append the run_analysis flag
+        // Note: FastAPI expects boolean as query param or part of formData?
+        // Let's check api.py... it takes `run_analysis: bool = False`. 
+        // In FastAPI, if not specified in Body/Form, it's a query param.
+        // Let's pass it as a query param for simplicity.
+
         try {
-            const response = await axios.post(API_ENDPOINTS.BATCH_UPLOAD, formData, {
+            const response = await axios.post(`${API_ENDPOINTS.BATCH_UPLOAD}?run_analysis=${runAnalysis}`, formData, {
                 headers: {
                     'Content-Type': 'multipart/form-data'
                 },

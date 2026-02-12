@@ -345,9 +345,10 @@ async def analyze_image(request: AnalyzeRequest):
                     dfs = DeepFace.find(
                         img_path=filepath, 
                         db_path=settings.FACES_DIR, 
-                        model_name="Facenet512", 
+                    model_name="Facenet512", 
                         distance_metric="cosine",
                         detector_backend="retinaface", 
+                        align=True,
                         enforce_detection=False, 
                         threshold=0.5, # Explicitly loosen internal filter so we can filter manually
                         silent=True
@@ -373,17 +374,27 @@ async def analyze_image(request: AnalyzeRequest):
                                     source_h = int(row.get('source_h', 0))
 
                                     # ACCURACY FIX: Ignore detections that are too small (likely texture noise)
-                                    # Increased to 50x50 to filter out blurry blobs
-                                    if source_w < 50 or source_h < 50:
+                                    # Relaxed to 30x30 for "media team" group shots
+                                    if source_w < 20 or source_h < 20:
                                         # print(f"DEBUG: Skipping match for {name} ({distance:.4f}) due to small detection size ({source_w}x{source_h})")
                                         continue
 
-                                    # Set threshold to 0.40 to capture Harry (0.37) while still filtering noise.
-                                    # ACCURACY FIX: Relaxed from 0.35 to 0.40
-                                    # - Captures Ron (distance ~0.32)
-                                    # - Captures Harry (distance ~0.37)
-                                    # - Rejects distinct non-matches (distance > 0.45)
-                                    if distance < 0.40: 
+                                    # ADAPTIVE THRESHOLDING
+                                    # Logic: Smaller faces (further away) are noisier, so we allow a looser threshold.
+                                    # Large, clear faces must match strictly.
+                                    face_size = max(source_w, source_h)
+                                    
+                                    # Adjusted to 250px because Harry was 162px and still needs relaxed threshold
+                                    if face_size < 250:
+                                        dynamic_threshold = 0.45  # Tightened from 0.50 to prevent False Positives (Ron matched Harry at 0.457)
+                                        desc = "Small/Far"
+                                    else:
+                                        dynamic_threshold = 0.40  # Strict for large/close faces
+                                        desc = "Large/Close"
+
+                                    # print(f"DEBUG: {name} - Size: {face_size}px ({desc}) - Dist: {distance:.4f} / Thresh: {dynamic_threshold}")
+
+                                    if distance < dynamic_threshold: 
                                         confidence = max(0, min(100, (1 - distance) * 100))
                                         
                                         # CROP THE FACE FOR VERIFICATION
@@ -437,7 +448,7 @@ async def analyze_image(request: AnalyzeRequest):
                                     source_h = int(first_row.get('source_h', 0))
                                     
                                     # Only show if it passes the size filter
-                                    if source_w >= 50 and source_h >= 50:
+                                    if source_w >= 20 and source_h >= 20:
                                         matches.append({
                                             "name": "Unknown",
                                             "box": {"x": source_x, "y": source_y, "w": source_w, "h": source_h},
@@ -627,7 +638,7 @@ async def register_face(request: AnalyzeRequest): # Reusing AnalyzeRequest for i
 @app.post("/batch_upload")
 async def batch_upload(
     file: UploadFile = File(...),
-    run_analysis: bool = True # Default to True, but frontend can toggle
+    run_analysis: bool = False # Default to False to prevent unwanted API usage
 ):
     """
     Handles bulk import of images.
@@ -660,8 +671,10 @@ async def batch_upload(
                 dfs = DeepFace.find(
                     img_path=filepath, 
                     db_path=settings.FACES_DIR, 
-                    model_name="VGG-Face", 
-                    detector_backend="mtcnn",
+                    model_name="FaceNet512",
+                    distance_metric="cosine",
+                    detector_backend="retinaface",
+                    align=True,
                     enforce_detection=False, 
                     silent=True
                 )
@@ -670,7 +683,7 @@ async def batch_upload(
                         # Iterate through results to find match within threshold
                         for index, row in df.iterrows():
                             distance = row.get('distance', 1.0)
-                            if distance < 0.60: # Consistent threshold (0.60)
+                            if distance < 0.40: # FaceNet512 Cosine threshold
                                 identity_path = row['identity']
                                 name = os.path.basename(os.path.dirname(identity_path))
                                 if name not in identified_people:
