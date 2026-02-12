@@ -137,3 +137,31 @@ def zoom_to_object(image_path: str, label: str, hf_model: str | None = None) -> 
     crop = image.crop((left, top, right, bottom))
 
     return to_mcp_image(crop)
+
+
+@mcp.tool()
+def describe_image(image_path: str, prompt: str = "Describe this image detailedly.") -> str:
+    """Describe the image found at image_path using Gemini Vision.
+
+    Args:
+        image_path: path to the image
+        prompt: (optional) prompt to guide the description (default: "Describe this image detailedly.")
+    """
+    from config.settings import settings
+    import google.generativeai as genai
+    from core.utils import load_image
+
+    if not settings.GEMINI_API_KEY:
+        return "Error: Gemini API Key is not configured."
+
+    try:
+        genai.configure(api_key=settings.GEMINI_API_KEY)
+        model = genai.GenerativeModel('gemini-2.0-flash-lite-001')
+        
+        image = load_image(image_path)
+        
+        # Gemini expects PIL Image directly
+        response = model.generate_content([prompt, image])
+        return response.text
+    except Exception as e:
+        return f"Error describing image: {str(e)}"

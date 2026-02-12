@@ -354,12 +354,12 @@ async def analyze_image(request: AnalyzeRequest):
                     )
                     
                     total_faces_detected = len(dfs)
-                    print(f"DEBUG: DeepFace (RetinaFace/Facenet512) detected {total_faces_detected} faces.")
+                    # print(f"DEBUG: DeepFace (RetinaFace/Facenet512) detected {total_faces_detected} faces.")
 
                     for i, df in enumerate(dfs):
-                        print(f"DEBUG: Processing Face {i}...")
+                        # print(f"DEBUG: Processing Face {i}...")
                         if not df.empty:
-                            print(f"DEBUG: Face {i} has {len(df)} potential matches.")
+                            # print(f"DEBUG: Face {i} has {len(df)} potential matches.")
                             # Iterate through DataFrame rows for this specific detected face
                             # Find the first entry that meets the threshold (0.60)
                             for index, row in df.iterrows():
@@ -371,18 +371,19 @@ async def analyze_image(request: AnalyzeRequest):
                                     source_y = int(row.get('source_y', 0))
                                     source_w = int(row.get('source_w', 0))
                                     source_h = int(row.get('source_h', 0))
-                                    
+
                                     # ACCURACY FIX: Ignore detections that are too small (likely texture noise)
                                     # Increased to 50x50 to filter out blurry blobs
                                     if source_w < 50 or source_h < 50:
-                                        print(f"DEBUG: Skipping match for {name} ({distance:.4f}) due to small detection size ({source_w}x{source_h})")
+                                        # print(f"DEBUG: Skipping match for {name} ({distance:.4f}) due to small detection size ({source_w}x{source_h})")
                                         continue
 
-                                    # Set threshold to 0.35 to filter out false positives.
-                                    # ACCURACY FIX: 0.35 is the "Sweet Spot"
-                                    # - Captures Ron (Distance 0.32)
-                                    # - Rejects false Wally (Distance ~0.37)
-                                    if distance < 0.35: 
+                                    # Set threshold to 0.40 to capture Harry (0.37) while still filtering noise.
+                                    # ACCURACY FIX: Relaxed from 0.35 to 0.40
+                                    # - Captures Ron (distance ~0.32)
+                                    # - Captures Harry (distance ~0.37)
+                                    # - Rejects distinct non-matches (distance > 0.45)
+                                    if distance < 0.40: 
                                         confidence = max(0, min(100, (1 - distance) * 100))
                                         
                                         # CROP THE FACE FOR VERIFICATION
