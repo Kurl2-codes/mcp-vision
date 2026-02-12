@@ -3,6 +3,7 @@
 .env.local
 .env.development.local
 .env.test.local
+frontend_code_standard.md
 .env.production.local
 
 # Python

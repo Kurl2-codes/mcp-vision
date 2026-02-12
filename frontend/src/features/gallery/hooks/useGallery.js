@@ -55,7 +55,19 @@ export function useGallery() {
         isLoading,
         filters,
         setFilters,
+        setFilters,
         refresh: fetchHistory,
-        refreshIdentities: fetchIdentities
+        refreshIdentities: fetchIdentities,
+        deleteImage: async (filename) => {
+            if (!window.confirm("Are you sure you want to delete this image?")) return;
+            try {
+                await axios.delete(`${API_ENDPOINTS.BASE}/images/${filename}`);
+                // Optimistic update
+                setHistory(prev => prev.filter(item => !item.filepath.includes(filename)));
+            } catch (error) {
+                console.error("Failed to delete image", error);
+                alert("Failed to delete image");
+            }
+        }
     };
 }

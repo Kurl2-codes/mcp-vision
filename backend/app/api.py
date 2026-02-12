@@ -154,11 +154,12 @@ class AnalyzeRequest(BaseModel):
     prompt: str
     session_id: Optional[str] = None
     skip_faces: bool = False # New flag for "Describe Only" mode
-    detailed_analysis: bool = True # New flag for "Detailed Analysis" mode (default True for backward compat)
+    detailed_analysis: bool = False # Default to False to prevent accidental API key errors
 
 class ZoomRequest(BaseModel):
     image_base64: str
     label: str
+    session_id: Optional[str] = None
 
 class LoginRequest(BaseModel):
     username: str
@@ -235,24 +236,34 @@ async def get_sessions():
     return {"sessions": sessions}
 
 @app.get("/sessions/{session_id}")
-async def get_session_history(session_id: str):
-    """Get full history for a session"""
+async def get_session(session_id: str):
+    """Retrieve history for a specific session"""
     if 'sessions_collection' not in globals():
-        raise HTTPException(status_code=404, detail="Database unavailable")
+        raise HTTPException(status_code=500, detail="Database not connected")
         
     session = sessions_collection.find_one({"session_id": session_id}, {"_id": 0})
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
-        
     return session
+
+@app.delete("/sessions/{session_id}")
+async def delete_session(session_id: str):
+    """Delete a session and its history"""
+    if 'sessions_collection' not in globals():
+        raise HTTPException(status_code=500, detail="Database not connected")
+    
+    result = sessions_collection.delete_one({"session_id": session_id})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Session not found")
+        
+    return {"status": "success", "message": f"Session {session_id} deleted"}
 
 @app.post("/analyze")
 async def analyze_image(request: AnalyzeRequest):
     """
     Analyzes an image using Gemini Flash locally + Face Rec + MongoDB logging.
     """
-    if not settings.GEMINI_API_KEY:
-        raise HTTPException(status_code=500, detail="Gemini API Key not configured")
+    # REMOVED: if not settings.GEMINI_API_KEY: raise ... (Allow offline flow)
 
     try:
         analysis_text = ""
@@ -265,6 +276,12 @@ async def analyze_image(request: AnalyzeRequest):
             # 1. Search Memory
             memory_context = _search_memory(request.prompt)
             
+            if not settings.GEMINI_API_KEY:
+                 if memory_context:
+                      return {"response": f"**Offline Search Results**:\n\n{memory_context}", "matches": []}
+                 else:
+                      return {"response": "Offline Mode: No matching memories found for your query.", "matches": []}
+
             # 2. Ask Gemini
             model = genai.GenerativeModel('gemini-2.0-flash-lite-001')
             rag_prompt = (
@@ -311,67 +328,144 @@ async def analyze_image(request: AnalyzeRequest):
             filepath = os.path.join(settings.UPLOADS_DIR, filename)
             image.save(filepath)
 
+            print(f"DEBUG: prompt='{request.prompt}', detailed={request.detailed_analysis}, skip={request.skip_faces}, key={bool(settings.GEMINI_API_KEY)}")
+
             # 2. Face Recognition (Who is this?)
-            # OPTIMIZATION: Only run DeepFace if we have registered faces AND if not skipped
-            matches = [] # store detailed match info: {name, box, confidence, reference_image}
+            matches = [] # Initialize here to prevent UnboundLocalError
             
+            # OPTIMIZATION: Only run DeepFace if we have registered faces AND if not skipped
             has_registered_faces = any(os.path.isdir(os.path.join(settings.FACES_DIR, d)) for d in os.listdir(settings.FACES_DIR))
             
             if has_registered_faces and not request.skip_faces:
                 try:
                     from deepface import DeepFace
-                    # Run find with enforce_detection=False to avoid crashes on no faces
-                    # We need to access individual results
-                    dfs = DeepFace.find(img_path=filepath, db_path=settings.FACES_DIR, model_name="VGG-Face", enforce_detection=False, silent=True)
+                    # Switch to 'retinaface' for MAXIMUM accuracy and 'Facenet512' for robust recognition
+                    # Threshold for Facenet512 (Cosine) relaxed to 0.40 to catch valid faces like Ron 
+                    # while typically avoiding the gross errors seen with VGG-Face at 0.60
+                    dfs = DeepFace.find(
+                        img_path=filepath, 
+                        db_path=settings.FACES_DIR, 
+                        model_name="Facenet512", 
+                        distance_metric="cosine",
+                        detector_backend="retinaface", 
+                        enforce_detection=False, 
+                        threshold=0.5, # Explicitly loosen internal filter so we can filter manually
+                        silent=True
+                    )
                     
-                    for df in dfs:
-                        if not df.empty:
-                            # Iterate through DataFrame rows
-                            for index, row in df.iterrows():
-                                identity_path = row['identity']
-                                name = os.path.basename(os.path.dirname(identity_path))
-                                
-                                # Confidence logic (VGG-Face cosine distance)
-                                # Lower distance = Higher confidence. Threshold is usually ~0.40
-                                distance = row.get('distance', 0)
-                                confidence = max(0, min(100, (1 - distance) * 100)) # Simple approximation
-                                
-                                # Bounding Box (x, y, w, h)
-                                source_x = row.get('source_x', 0)
-                                source_y = row.get('source_y', 0)
-                                source_w = row.get('source_w', 0)
-                                source_h = row.get('source_h', 0)
-                                
-                                # Reference Image URL (served via static mount)
-                                # Path: faces/NAME/uuid.jpg -> URL: /images/faces/NAME/uuid.jpg
-                                ref_filename = os.path.basename(identity_path)
-                                reference_url = f"http://localhost:8000/images/faces/{name}/{ref_filename}"
+                    total_faces_detected = len(dfs)
+                    print(f"DEBUG: DeepFace (RetinaFace/Facenet512) detected {total_faces_detected} faces.")
 
-                                if name not in identified_people:
-                                    identified_people.append(name)
+                    for i, df in enumerate(dfs):
+                        print(f"DEBUG: Processing Face {i}...")
+                        if not df.empty:
+                            print(f"DEBUG: Face {i} has {len(df)} potential matches.")
+                            # Iterate through DataFrame rows for this specific detected face
+                            # Find the first entry that meets the threshold (0.60)
+                            for index, row in df.iterrows():
+                                    identity_path = row['identity']
+                                    name = os.path.basename(os.path.dirname(identity_path))
+                                    distance = row.get('distance', 1.0)
                                     
-                                matches.append({
-                                    "name": name,
-                                    "box": {"x": source_x, "y": source_y, "w": source_w, "h": source_h},
-                                    "confidence": f"{confidence:.1f}%",
-                                    "reference_image": reference_url
-                                })
+                                    source_x = int(row.get('source_x', 0))
+                                    source_y = int(row.get('source_y', 0))
+                                    source_w = int(row.get('source_w', 0))
+                                    source_h = int(row.get('source_h', 0))
+                                    
+                                    # ACCURACY FIX: Ignore detections that are too small (likely texture noise)
+                                    # Increased to 50x50 to filter out blurry blobs
+                                    if source_w < 50 or source_h < 50:
+                                        print(f"DEBUG: Skipping match for {name} ({distance:.4f}) due to small detection size ({source_w}x{source_h})")
+                                        continue
+
+                                    # Set threshold to 0.35 to filter out false positives.
+                                    # ACCURACY FIX: 0.35 is the "Sweet Spot"
+                                    # - Captures Ron (Distance 0.32)
+                                    # - Rejects false Wally (Distance ~0.37)
+                                    if distance < 0.35: 
+                                        confidence = max(0, min(100, (1 - distance) * 100))
+                                        
+                                        # CROP THE FACE FOR VERIFICATION
+                                        face_crop_base64 = None
+                                        try:
+                                            # Crop: (left, top, right, bottom)
+                                            crop_box = (source_x, source_y, source_x + source_w, source_y + source_h)
+                                            face_img = image.crop(crop_box)
+                                            face_crop_base64 = pil_to_base64(face_img)
+                                        except Exception as crop_err:
+                                            print(f"DEBUG: Failed to crop face {i}: {crop_err}")
+
+                                        ref_filename = os.path.basename(identity_path)
+                                        reference_url = f"http://localhost:8000/images/faces/{name}/{ref_filename}"
+
+                                        if name not in identified_people:
+                                            identified_people.append(name)
+                                        
+                                        # --- ADAPTIVE LEARNING ---
+                                        # If match is very strong (e.g. < 0.25), auto-save this new crop as a reference
+                                        # to help the model learn new angles/aging/makeup over time.
+                                        if distance < 0.25:
+                                            try:
+                                                person_dir = os.path.dirname(identity_path)
+                                                # Limit total reference images to 15 to prevent bloat
+                                                if len(os.listdir(person_dir)) < 15:
+                                                    new_ref_filename = f"auto_{uuid.uuid4()}.jpg"
+                                                    new_ref_path = os.path.join(person_dir, new_ref_filename)
+                                                    face_img.save(new_ref_path)
+                                                    print(f"DEBUG: Adaptive Learning - Saved new reference for {name} ({distance:.4f})")
+                                            except Exception as save_err:
+                                                print(f"DEBUG: Adaptive Learning failed: {save_err}")
+                                            
+                                        matches.append({
+                                            "name": name,
+                                            "box": {"x": source_x, "y": source_y, "w": source_w, "h": source_h},
+                                            "confidence": f"{confidence:.1f}%",
+                                            "reference_image": reference_url,
+                                            "face_crop": face_crop_base64 # Send back the crop!
+                                        })
+                                        break # Take the best match for this face and move to next detected face
+                            else:
+                                # If loop finishes without break, no match met the threshold
+                                # But we still want to show the detected face as "Unknown"
+                                if not df.empty:
+                                    # Get the box from the first row (the detection itself is valid)
+                                    first_row = df.iloc[0]
+                                    source_x = int(first_row.get('source_x', 0))
+                                    source_y = int(first_row.get('source_y', 0))
+                                    source_w = int(first_row.get('source_w', 0))
+                                    source_h = int(first_row.get('source_h', 0))
+                                    
+                                    # Only show if it passes the size filter
+                                    if source_w >= 50 and source_h >= 50:
+                                        matches.append({
+                                            "name": "Unknown",
+                                            "box": {"x": source_x, "y": source_y, "w": source_w, "h": source_h},
+                                            "confidence": "0%",
+                                            "reference_image": None,
+                                            "face_crop": None 
+                                        })
+                                print(f"DEBUG: Face {i} detected but no match met the distance threshold (Best: {df.iloc[0]['distance'] if not df.empty else 'N/A'})")
+                        else:
+                            print(f"DEBUG: Face {i} detected but no match found in database.")
 
                 except Exception as e:
                     print(f"Face Rec Warning: {e}")
                     traceback.print_exc()
             
+            # Check for PROMPT content (strip whitespace handling)
+            has_prompt = request.prompt and request.prompt.strip()
+
             # 3. Gemini Analysis (Description / Tags)
             # Only run if detailed_analysis is True OR if we found people (to contextually link them) 
             # OR if skip_faces is True (Vision Mode always gets analysis)
-            if request.detailed_analysis or request.skip_faces:
+            if (request.detailed_analysis or request.skip_faces) and settings.GEMINI_API_KEY:
                 model = genai.GenerativeModel('gemini-2.0-flash-lite-001')
                 
                 # If we found people, inform Gemini
-                context_prompt = request.prompt
+                context_prompt = request.prompt or "Describe this image."
                 
                 # Inject Micro-VLA structure if user asks to "describe"
-                if "describe" in request.prompt.lower():
+                if request.prompt and "describe" in request.prompt.lower():
                      context_prompt = (
                          f"{request.prompt}\n\n"
                          "Provide a **bulleted summary (max 30 words)**:\n"
@@ -381,10 +475,28 @@ async def analyze_image(request: AnalyzeRequest):
                      )
                 elif identified_people:
                     names_str = ", ".join(identified_people)
-                    context_prompt = f"The image contains these known people: {names_str}. {request.prompt}"
+                    user_instruction = request.prompt
+                    if not user_instruction or not user_instruction.strip():
+                        user_instruction = "Describe this image."
+                    context_prompt = f"The image contains these known people: {names_str}. {user_instruction}"
 
-                response = model.generate_content([context_prompt, image])
-                analysis_text = response.text
+                try:
+                    response = model.generate_content([context_prompt, image])
+                    analysis_text = response.text
+                except Exception as g_err:
+                    print(f"Gemini Error: {g_err}")
+                    analysis_text = "AI Analysis Failed (Check Server Logs)"
+
+            elif not settings.GEMINI_API_KEY and (request.detailed_analysis or has_prompt):
+                 # User asked for analysis but no key provided
+                 if request.skip_faces:
+                      # Vision Mode (skip_faces=True) relies 100% on Gemini.
+                      analysis_text = "Vision Mode requires Gemini API Key. Switch to Memory Mode for Face Recognition."
+                 elif identified_people:
+                      # If we found faces, just report them. Don't nag the user about the key.
+                      analysis_text = f"Identified: {', '.join(identified_people)}"
+                 else:
+                      analysis_text = "No known faces found. (AI Analysis skipped - missing key)."
             else:
                 # FAST PATH: No Gemini Analysis, just identities
                 if identified_people:
@@ -477,10 +589,17 @@ async def register_face(request: AnalyzeRequest): # Reusing AnalyzeRequest for i
             os.remove(pkl_path)
             
         # --- Run Gemini Analysis for Metadata ---
-        model = genai.GenerativeModel('gemini-2.0-flash-lite-001')
-        analysis_prompt = f"Describe the appearance of this person named {name}. Include details about clothing, colors, and accessories."
-        response = model.generate_content([analysis_prompt, image])
-        analysis_text = response.text
+        if settings.GEMINI_API_KEY:
+            try:
+                model = genai.GenerativeModel('gemini-2.0-flash-lite-001')
+                analysis_prompt = f"Describe the appearance of this person named {name}. Include details about clothing, colors, and accessories."
+                response = model.generate_content([analysis_prompt, image])
+                analysis_text = response.text
+            except Exception as g_err:
+                print(f"Gemini Error during registration: {g_err}")
+                analysis_text = "Analysis unavailable (Gemini Error)"
+        else:
+             analysis_text = "Analysis unavailable (Offline/No API Key)"
         
         # Save to MongoDB History
         log_entry = {
@@ -496,7 +615,7 @@ async def register_face(request: AnalyzeRequest): # Reusing AnalyzeRequest for i
 
         return {
             "status": "success", 
-            "message": f"Registered {name} and indexed appearance.",
+            "message": f"Registered {name}.",
             "analysis": analysis_text
         }
 
@@ -536,15 +655,26 @@ async def batch_upload(
         if has_registered_faces:
             try:
                 from deepface import DeepFace
-                # Run find
-                dfs = DeepFace.find(img_path=filepath, db_path=settings.FACES_DIR, model_name="VGG-Face", enforce_detection=False, silent=True)
+                # Run find with explicit opencv backend and multiple results handling
+                dfs = DeepFace.find(
+                    img_path=filepath, 
+                    db_path=settings.FACES_DIR, 
+                    model_name="VGG-Face", 
+                    detector_backend="mtcnn",
+                    enforce_detection=False, 
+                    silent=True
+                )
                 for df in dfs:
                     if not df.empty:
-                        paths = df['identity'].values
-                        for p in paths:
-                            name = os.path.basename(os.path.dirname(p))
-                            if name not in identified_people:
-                                identified_people.append(name)
+                        # Iterate through results to find match within threshold
+                        for index, row in df.iterrows():
+                            distance = row.get('distance', 1.0)
+                            if distance < 0.60: # Consistent threshold (0.60)
+                                identity_path = row['identity']
+                                name = os.path.basename(os.path.dirname(identity_path))
+                                if name not in identified_people:
+                                    identified_people.append(name)
+                                break
             except Exception as e:
                 print(f"DeepFace Warning: {e}")
 
@@ -681,10 +811,32 @@ async def zoom_image(request: ZoomRequest):
             # result_mcp_image.data is bytes
             cropped_base64 = base64.b64encode(result_mcp_image.data).decode('utf-8')
             
+            # --- PERSISTENCE LOGIC ---
+            # Save zoomed image so it survives refreshes
+            zoom_filename = f"zoom_{uuid.uuid4()}.jpg"
+            zoom_filepath = os.path.join(settings.UPLOADS_DIR, zoom_filename)
+            with open(zoom_filepath, "wb") as f:
+                f.write(result_mcp_image.data)
+            
+            zoom_url = f"http://localhost:8000/images/uploads/{zoom_filename}"
+
+            if request.session_id and 'sessions_collection' in globals():
+                zoom_msg = {
+                    "role": "assistant",
+                    "content": f"🔍 Zoomed in on **{request.label}**",
+                    "image": zoom_url,
+                    "timestamp": datetime.now().isoformat()
+                }
+                sessions_collection.update_one(
+                    {"session_id": request.session_id},
+                    {"$push": {"messages": zoom_msg}}
+                )
+
             return {
                 "found": True, 
                 "cropped_image": cropped_base64,
-                "format": result_mcp_image.format
+                "format": result_mcp_image.format,
+                "url": zoom_url
             }
             
         finally:
@@ -693,6 +845,30 @@ async def zoom_image(request: ZoomRequest):
                 
     except Exception as e:
         traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/images/{filename}")
+async def delete_image(filename: str):
+    """
+    Deletes an image from storage and history.
+    """
+    try:
+        # 1. Delete file from uploads
+        filepath = os.path.join(settings.UPLOADS_DIR, filename)
+        if os.path.exists(filepath):
+            os.remove(filepath)
+            
+        # 2. Delete from MongoDB History
+        if 'history_collection' in globals():
+            result = history_collection.delete_one({"filepath": filepath})
+            if result.deleted_count == 0:
+                # Try partial match if absolute path differs
+                history_collection.delete_one({"filepath": {"$regex": filename}})
+
+        return {"status": "success", "message": f"Deleted {filename}"}
+
+    except Exception as e:
+        print(f"Error deleting image: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":

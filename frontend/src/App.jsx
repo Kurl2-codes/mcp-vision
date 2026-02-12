@@ -148,6 +148,54 @@ function App() {
     const [verificationModalOpen, setVerificationModalOpen] = useState(false);
     const [currentVerification, setCurrentVerification] = useState(null); // { image: string, matches: [] }
 
+    // UI Improvements State (Zoom & Delete)
+    const [zoomedImage, setZoomedImage] = useState(null);
+    const [confirmationData, setConfirmationData] = useState({ isOpen: false, message: '', onConfirm: null });
+
+    // --- HANDLERS ---
+
+    // Zoom Handler
+    const handleZoomImage = (imgSrc) => {
+        setZoomedImage(imgSrc);
+    };
+
+    // Delete Confirmation Helper
+    const requestConfirmation = (message, onConfirmAction) => {
+        setConfirmationData({
+            isOpen: true,
+            message: message,
+            onConfirm: () => {
+                onConfirmAction();
+                setConfirmationData({ isOpen: false, message: '', onConfirm: null });
+            }
+        });
+    };
+
+    // Delete Message Handler
+    const handleDeleteMessage = (index) => {
+        requestConfirmation("Are you sure you want to delete this message?", () => {
+            setMessages(prev => prev.filter((_, i) => i !== index));
+        });
+    };
+
+    // Delete Gallery Item Handler
+    const handleDeleteGalleryItem = async (filename) => {
+        requestConfirmation("PERMANENTLY delete this image from memory? This cannot be undone.", async () => {
+            try {
+                await axios.delete(`http://localhost:8000/images/${filename}`);
+                // Remove locally
+                setGalleryItems(prev => prev.filter(item => !item.filepath.includes(filename)));
+                // Also close verification if open
+                if (currentVerification && currentVerification.image.includes(filename)) {
+                    setVerificationModalOpen(false);
+                }
+            } catch (err) {
+                console.error("Delete failed:", err);
+                alert("Failed to delete image.");
+            }
+        });
+    };
+
     // Auth State
     const [isAuthenticated, setIsAuthenticated] = useState(localStorage.getItem('mcp_token') === 'authenticated');
     const [loginData, setLoginData] = useState({ username: '', password: '' });
@@ -274,8 +322,6 @@ function App() {
         try {
             const res = await axios.get(`http://localhost:8000/sessions/${id}`);
             setSessionId(id);
-            // Transform messages if needed (backend stores image as URL, frontend might need adjustment if logic changes, 
-            // but for now we trust `messages` array structure: {role, content, image})
             setMessages(res.data.messages || []);
             setViewMode('chat');
             if (window.innerWidth < 768) setSidebarOpen(false);
@@ -284,6 +330,22 @@ function App() {
         } finally {
             setIsLoading(false);
         }
+    };
+
+    const handleDeleteSession = async (e, id) => {
+        e.stopPropagation(); // Prevent loading the session
+
+        requestConfirmation("Are you sure you want to delete this chat history?", async () => {
+            try {
+                await axios.delete(`http://localhost:8000/sessions/${id}`);
+                if (sessionId === id) {
+                    handleNewChat();
+                }
+                fetchSessions();
+            } catch (e) {
+                console.error("Delete Session Error", e);
+            }
+        });
     };
 
     // --- GALLERY FETCH ---
@@ -415,15 +477,20 @@ function App() {
 
             // 2. Routing Logic (Zoom / Questionnaire / Analyze)
             if (userContent.toLowerCase().includes('zoom') && currentImage) {
-                // Zoom (Logic simplified for brevity - assumes no session storage yet for zoom specific endpoint 
-                // unless we upgrade zoom endpoint too. For now, just display result)
-                // NOTE: Zoom endpoint doesn't support session_id yet, so it won't save to history properly.
-                // We'll just stick to standard flow or accept it doesn't save to session DB for now.
+                // Zoom Logic
                 const label = userContent.toLowerCase().replace(/zoom|in|on|the/g, '').trim();
-                const response = await axios.post('http://localhost:8000/zoom', { image_base64: imageBase64, label: label });
+                const response = await axios.post('http://localhost:8000/zoom', {
+                    image_base64: imageBase64,
+                    label: label,
+                    session_id: activeSessionId // Now supported!
+                });
 
                 if (response.data.found) {
-                    const msg = { role: 'assistant', image: `data:image/${response.data.format};base64,${response.data.cropped_image}`, content: `Zoomed in on **${label}**.` };
+                    const msg = {
+                        role: 'assistant',
+                        image: response.data.url || `data:image/${response.data.format};base64,${response.data.cropped_image}`,
+                        content: `Zoomed in on **${label}**.`
+                    };
                     setMessages(prev => [...prev, msg]);
                 } else {
                     setMessages(prev => [...prev, { role: 'assistant', content: `I couldn't find a **${label}**.` }]);
@@ -436,10 +503,9 @@ function App() {
                 setMessages(prev => [...prev, { role: 'assistant', type: 'collapsible', title: 'VLA Results', content: response.data.response }]);
 
             } else {
-                // STANDARD ANALYZE / CHAT / RAG
                 const response = await axios.post('http://localhost:8000/analyze', {
                     image_base64: imageBase64, // can be null
-                    prompt: userContent || "Describe this image.",
+                    prompt: userContent || "", // Don't force "Describe this image." default. Let backend handle empty prompts.
                     session_id: activeSessionId, // Pass session ID!
                     skip_faces: aiMode === 'vision', // Skip faec rec if in Vision mode
                     detailed_analysis: aiMode === 'memory' ? detailedAnalysis : true // Only limit detail in Memory mode if unchecked. Vision always detailed.
@@ -624,18 +690,27 @@ function App() {
                         </div>
 
                         {sessions.map(sess => (
-                            <button
-                                key={sess.session_id}
-                                onClick={() => loadSession(sess.session_id)}
-                                className={`w-full text-left px-4 py-3 rounded-xl text-sm flex items-center space-x-3 transition-all duration-200 group ${sessionId === sess.session_id
-                                    ? 'bg-slate-800 text-white border border-slate-700/50 shadow-lg'
-                                    : 'text-slate-400 hover:bg-white/5 hover:text-slate-200'}`}
-                            >
-                                <div className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 transition-colors ${sessionId === sess.session_id ? 'bg-indigo-500/20 text-indigo-400' : 'bg-slate-800/50 text-slate-500 group-hover:bg-slate-800 group-hover:text-slate-300'}`}>
-                                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" /></svg>
-                                </div>
-                                <span className="truncate font-medium">{sess.title || "New Chat"}</span>
-                            </button>
+                            <div key={sess.session_id} className="group relative">
+                                <button
+                                    onClick={() => loadSession(sess.session_id)}
+                                    className={`w-full text-left px-4 py-3 rounded-xl text-sm flex items-center space-x-3 transition-all duration-200 ${sessionId === sess.session_id
+                                        ? 'bg-slate-800 text-white border border-slate-700/50 shadow-lg'
+                                        : 'text-slate-400 hover:bg-white/5 hover:text-slate-200'}`}
+                                >
+                                    <div className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 transition-colors ${sessionId === sess.session_id ? 'bg-indigo-500/20 text-indigo-400' : 'bg-slate-800/50 text-slate-500 group-hover:bg-slate-800 group-hover:text-slate-300'}`}>
+                                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" /></svg>
+                                    </div>
+                                    <span className="truncate font-medium pr-8">{sess.title || "New Chat"}</span>
+                                </button>
+
+                                <button
+                                    onClick={(e) => handleDeleteSession(e, sess.session_id)}
+                                    className="absolute right-3 top-1/2 -translate-y-1/2 p-1.5 text-slate-600 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-all hover:bg-red-500/10 rounded-lg"
+                                    title="Delete chat"
+                                >
+                                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                                </button>
+                            </div>
                         ))}
                     </div>
 
@@ -735,23 +810,42 @@ function App() {
                                         </div>
                                     )}
 
-                                    <div className={`flex flex-col max-w-[85%] md:max-w-[75%] space-y-2 ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
+                                    <div className={`flex flex-col max-w-[85%] md:max-w-[75%] space-y-2 ${msg.role === 'user' ? 'items-end' : 'items-start'} relative group`}>
 
                                         {/* Image Attachment */}
                                         {msg.image && (
-                                            <div className="relative overflow-hidden rounded-xl border border-slate-700 shadow-xl bg-slate-900 mb-2">
-                                                <img src={msg.image} alt="Attachment" className="max-h-80 object-contain" />
+                                            <div
+                                                className="relative overflow-hidden rounded-xl border border-slate-700 shadow-xl bg-slate-900 mb-2 cursor-zoom-in transition-transform hover:scale-[1.02]"
+                                                onClick={() => handleZoomImage(msg.image)}
+                                            >
+                                                <img
+                                                    src={msg.image}
+                                                    alt="Attachment"
+                                                    className="max-h-80 object-contain"
+                                                    onError={(e) => { e.target.style.display = 'none' }}
+                                                />
                                             </div>
                                         )}
 
                                         {/* Text Bubble */}
                                         {msg.content && !msg.type && (
-                                            <div className={`px-5 py-3.5 text-[15px] leading-7 shadow-sm
+                                            <div className={`px-5 py-3.5 text-[15px] leading-7 shadow-sm relative group/bubble
                                                 ${msg.role === 'user'
                                                     ? 'bg-indigo-600 text-white rounded-2xl rounded-tr-sm'
                                                     : 'bg-slate-800 text-slate-200 rounded-2xl rounded-tl-sm border border-slate-700/50'
                                                 }`}>
+
+                                                {/* Delete Message Button (Visible on Hover) */}
+                                                <button
+                                                    onClick={(e) => { e.stopPropagation(); handleDeleteMessage(index); }}
+                                                    className={`absolute -top-3 ${msg.role === 'user' ? '-left-3' : '-right-3'} p-1.5 bg-red-500/10 hover:bg-red-500 text-red-400 hover:text-white rounded-full opacity-0 group-hover/bubble:opacity-100 transition-all duration-200 shadow-lg scale-90 hover:scale-110`}
+                                                    title="Delete Message"
+                                                >
+                                                    <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                                                </button>
+
                                                 <div className="prose prose-invert prose-sm max-w-none prose-p:leading-relaxed prose-pre:bg-slate-950 prose-pre:border prose-pre:border-slate-700">
+                                                    {/* ... markdown content ... */}
                                                     <ReactMarkdown>{msg.content}</ReactMarkdown>
 
                                                     {/* Verify Matches Button */}
@@ -773,7 +867,16 @@ function App() {
 
                                         {/* Collapsible Tool Output */}
                                         {msg.type === 'collapsible' && (
-                                            <div className="w-full"><CollapsibleMessage title={msg.title} content={msg.content} /></div>
+                                            <div className="w-full relative group/tool">
+                                                <CollapsibleMessage title={msg.title} content={msg.content} />
+                                                {/* Delete Button for Tool Output */}
+                                                <button
+                                                    onClick={(e) => { e.stopPropagation(); handleDeleteMessage(index); }}
+                                                    className="absolute -top-2 -right-2 p-1 bg-slate-800 text-slate-500 hover:text-red-400 rounded-full opacity-0 group-hover/tool:opacity-100 transition-opacity"
+                                                >
+                                                    <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                                                </button>
+                                            </div>
                                         )}
 
                                         {/* Timestamp (Hidden by default, shown on group hover) */}
@@ -792,7 +895,7 @@ function App() {
                                         <svg className="w-5 h-5 animate-spin" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
                                     </div>
                                     <div className="glass px-5 py-4 rounded-2xl rounded-tl-sm flex items-center space-x-2">
-                                        <span className="text-sm text-slate-400 font-medium">Thinking</span>
+                                        <span className="text-sm text-slate-400 font-medium">Analyzing</span>
                                         <div className="flex space-x-1">
                                             <div className="w-1.5 h-1.5 bg-indigo-500 rounded-full animate-bounce [animation-delay:-0.3s]"></div>
                                             <div className="w-1.5 h-1.5 bg-indigo-500 rounded-full animate-bounce [animation-delay:-0.15s]"></div>
@@ -844,15 +947,24 @@ function App() {
                                                             <div className="flex items-center space-x-2">
                                                                 <p className="text-slate-500 text-[10px] font-mono">{new Date(item.timestamp).toLocaleDateString()}</p>
                                                             </div>
-                                                            <a
-                                                                href={`http://localhost:8000/${item.filepath.replace(/\\/g, '/')}`}
-                                                                download={`${item.identities?.[0] || 'Unknown'}_${new Date(item.timestamp).toISOString().split('T')[0]}.jpg`}
-                                                                onClick={(e) => e.stopPropagation()}
-                                                                className="p-1.5 bg-white/10 hover:bg-indigo-500 rounded-lg text-white transition-colors group/btn"
-                                                                title="Download Image"
-                                                            >
-                                                                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
-                                                            </a>
+                                                            <div className="flex items-center space-x-1">
+                                                                <a
+                                                                    href={`http://localhost:8000/${item.filepath.replace(/\\/g, '/')}`}
+                                                                    download={`${item.identities?.[0] || 'Unknown'}_${new Date(item.timestamp).toISOString().split('T')[0]}.jpg`}
+                                                                    onClick={(e) => e.stopPropagation()}
+                                                                    className="p-1.5 bg-white/10 hover:bg-indigo-500 rounded-lg text-white transition-colors group/btn"
+                                                                    title="Download Image"
+                                                                >
+                                                                    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
+                                                                </a>
+                                                                <button
+                                                                    onClick={(e) => { e.stopPropagation(); handleDeleteGalleryItem(item.filepath.split('\\').pop().split('/').pop()); }}
+                                                                    className="p-1.5 bg-white/10 hover:bg-red-500 rounded-lg text-white transition-colors group/btn"
+                                                                    title="Delete Image"
+                                                                >
+                                                                    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                                                                </button>
+                                                            </div>
                                                         </div>
                                                     </div>
                                                 </div>
@@ -925,19 +1037,13 @@ function App() {
                                             <div className="space-y-1">
                                                 <p className="text-[10px] text-slate-500 uppercase font-bold">Detected</p>
                                                 <div className="aspect-square rounded-lg overflow-hidden bg-black relative border border-slate-600">
-                                                    {/* 
-                                                        To allow cropping the detected face from the full image client-side is complex without specific crop logic.
-                                                        For now, we'll show the box coordinates or a placeholder text if we can't easily crop.
-                                                        Ideally, the backend should return the cropped face or we use CSS clip-path?
-                                                        CSS clip-path is hard with variable image sizes.
-                                                        For "Backbone Design", we might just show the full scene focused or just the reference image?
-                                                        User asked for "side by side".
-                                                        If backend returns coordinates, we can try to use object-position? Hard to guess.
-                                                        Let's use the reference image.
-                                                     */}
-                                                    <div className="w-full h-full flex items-center justify-center text-slate-600 text-xs text-center p-2 bg-slate-900">
-                                                        (Face in Scene)
-                                                    </div>
+                                                    {match.face_crop ? (
+                                                        <img src={`data:image/jpeg;base64,${match.face_crop}`} className="w-full h-full object-cover" alt="Detected Face" />
+                                                    ) : (
+                                                        <div className="w-full h-full flex items-center justify-center text-slate-600 text-xs text-center p-2 bg-slate-900">
+                                                            (Face in Scene)
+                                                        </div>
+                                                    )}
                                                 </div>
                                             </div>
                                             <div className="space-y-1">
@@ -1102,6 +1208,55 @@ function App() {
                     </div>
                 </div>
             )}
+
+            {/* --- MODALS --- */}
+
+            {/* Image Zoom Modal */}
+            {zoomedImage && (
+                <div
+                    className="fixed inset-0 z-50 bg-black/95 flex items-center justify-center p-4 animate-fade-in cursor-zoom-out"
+                    onClick={() => setZoomedImage(null)}
+                >
+                    <img
+                        src={zoomedImage}
+                        className="max-h-[95vh] max-w-[95vw] object-contain rounded-lg shadow-2xl"
+                        alt="Zoomed"
+                    />
+                    <button
+                        className="absolute top-4 right-4 text-white/50 hover:text-white bg-black/50 hover:bg-black/80 rounded-full p-2 transition-colors"
+                        onClick={() => setZoomedImage(null)}
+                    >
+                        <svg className="w-8 h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                    </button>
+                </div>
+            )}
+
+            {/* Confirmation Modal */}
+            {confirmationData.isOpen && (
+                <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-fade-in">
+                    <div className="glass p-8 rounded-2xl max-w-sm w-full border border-white/10 shadow-2xl transform scale-100 animate-blob">
+                        <h3 className="text-xl font-bold text-white mb-2">Confirm Action</h3>
+                        <p className="text-slate-300 mb-6 leading-relaxed">
+                            {confirmationData.message}
+                        </p>
+                        <div className="flex justify-end space-x-3">
+                            <button
+                                onClick={() => setConfirmationData({ ...confirmationData, isOpen: false })}
+                                className="px-4 py-2 rounded-xl text-slate-400 hover:text-white hover:bg-white/5 transition-colors"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                onClick={confirmationData.onConfirm}
+                                className="px-5 py-2 rounded-xl bg-red-500 hover:bg-red-600 text-white font-medium shadow-lg shadow-red-500/20 transition-transform active:scale-95"
+                            >
+                                Confirm
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
             {/* Verification Modal */}
             {verificationModalOpen && currentVerification && (
                 <div className="fixed inset-0 bg-black/90 backdrop-blur-md z-50 flex items-center justify-center p-4 animate-fade-in">
@@ -1128,30 +1283,17 @@ function App() {
 
                                         {/* FOUND FACE (CROPPED VISUALIZATION) */}
                                         <div className="flex flex-col items-center space-y-2">
-                                            <div className="relative w-48 h-48 bg-black rounded-lg overflow-hidden border-2 border-slate-700 shadow-lg">
-                                                {/* We display the FULL image but cropped via CSS/Transform or just show full generic for now if cropping is hard client side. 
-                                                    Ideally we'd crop it canvas-side, but specific CSS scaling is easier.
-                                                    Alternatively: Render full image and overlay red box.
-                                                */}
-                                                <div className="relative w-full h-full flex items-center justify-center bg-slate-900">
-                                                    {/* Simplification: Show full image scaled to focus? Since we have coordinates, 
-                                                        let's just show the full image with a red box overlay in a mini-view 
-                                                    */}
+                                            <div className="relative w-48 h-48 bg-black rounded-lg overflow-hidden border-2 border-slate-700 shadow-lg flex items-center justify-center">
+                                                {match.face_crop ? (
+                                                    <img src={`data:image/jpeg;base64,${match.face_crop}`} className="w-full h-full object-cover" alt="Detected Face" />
+                                                ) : (
                                                     <div className="relative inline-block">
                                                         <img src={`data:image/jpeg;base64,${currentVerification.image}`} className="max-w-[180px] max-h-[180px] object-contain opacity-50 grayscale-[50%]" alt="Source" />
-                                                        {/* Red Box Overlay */}
-                                                        {(() => {
-                                                            // We unfortunately can't align this perfectly without knowing original image dimension vs rendered.
-                                                            // For now, simpler approach: Just show the generic image and the name.
-                                                            // The user can see the red box in their mind based on the prompt "Comparing..."
-                                                            // Proper approach: Canvas Crop. Let's stick to simple first.
-                                                            return null;
-                                                        })()}
+                                                        <div className="absolute inset-0 flex items-center justify-center">
+                                                            <span className="bg-slate-900/80 px-2 py-1 rounded text-xs text-white border border-slate-600">Detected in Group</span>
+                                                        </div>
                                                     </div>
-                                                    <div className="absolute inset-0 flex items-center justify-center">
-                                                        <span className="bg-slate-900/80 px-2 py-1 rounded text-xs text-white border border-slate-600">Detected in Group</span>
-                                                    </div>
-                                                </div>
+                                                )}
                                             </div>
                                             <span className="text-sm font-medium text-slate-300">Detected Face</span>
                                         </div>

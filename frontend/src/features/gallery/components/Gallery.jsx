@@ -3,7 +3,7 @@ import { useGallery } from '../hooks/useGallery';
 import { API_ENDPOINTS } from '../../../services/api';
 
 export default function Gallery() {
-    const { history, identities, isLoading, filters, setFilters, refresh } = useGallery();
+    const { history, identities, isLoading, filters, setFilters, refresh, deleteImage } = useGallery();
 
     return (
         <div className="h-full flex flex-col animate-fade-in relative z-10">
@@ -41,6 +41,20 @@ export default function Gallery() {
                                         alt={item.analysis || "Gallery Image"}
                                     />
                                     <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/20 to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex flex-col justify-end p-4">
+                                        <div className="absolute top-2 right-2 flex space-x-1">
+                                            <button
+                                                onClick={(e) => {
+                                                    e.stopPropagation();
+                                                    // Extract filename from filepath (e.g., "uploads/xyz.jpg" -> "xyz.jpg")
+                                                    const filename = item.filepath.split(/[/\\]/).pop();
+                                                    deleteImage(filename);
+                                                }}
+                                                className="p-1.5 bg-red-500/80 hover:bg-red-600 text-white rounded-full backdrop-blur-sm transition-colors"
+                                                title="Delete Image"
+                                            >
+                                                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                                            </button>
+                                        </div>
                                         <p className="text-white text-xs font-semibold line-clamp-1">{item.identities?.join(', ') || 'Unknown'}</p>
                                         <p className="text-slate-300 text-[10px] line-clamp-2 mt-1">{item.analysis}</p>
                                         <p className="text-slate-500 text-[9px] mt-2">{new Date(item.timestamp).toLocaleDateString()}</p>

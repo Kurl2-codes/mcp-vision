@@ -9,7 +9,7 @@ from mcp.server.fastmcp import Image as MCPImage
 def pil_to_base64(image: PILImage.Image) -> str:
     buffered = io.BytesIO()
     image.save(buffered, format="JPEG")
-    img_str = base64.b64encode(buffered.getvalue())
+    img_str = base64.b64encode(buffered.getvalue()).decode('utf-8')
     return img_str
 
 

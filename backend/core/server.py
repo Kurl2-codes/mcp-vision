@@ -131,7 +131,8 @@ def zoom_to_object(image_path: str, label: str, hf_model: str | None = None) -> 
     best_box = bboxes[0]
     left, top, right, bottom = best_box["box"].values()
 
-    image = PILImage.open(requests.get(image_path, stream=True).raw)
+    from core.utils import load_image
+    image = load_image(image_path)
 
     crop = image.crop((left, top, right, bottom))
 
